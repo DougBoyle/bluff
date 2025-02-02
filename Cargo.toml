@@ -1,0 +1,7 @@
+[package]
+name = "bluff"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+enum-map = "2.7.3"
