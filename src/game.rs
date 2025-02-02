@@ -292,7 +292,7 @@ impl<R: Rng> Game<R> {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::Flop => {
-                (self.output)(self.round.cards.community_cards[3].to_string());
+                (self.output)(self.round.cards.community_cards[..4].iter().map(|card| card.to_string()).collect());
                 self.round.phase = GamePhase::Turn;
                 self.round.pot.reset_current_raise();
 
@@ -306,7 +306,7 @@ impl<R: Rng> Game<R> {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::Turn => {
-                (self.output)(self.round.cards.community_cards[4].to_string());
+                (self.output)(self.round.cards.community_cards.iter().map(|card| card.to_string()).collect());
                 self.round.phase = GamePhase::River;
                 self.round.pot.reset_current_raise();
 
