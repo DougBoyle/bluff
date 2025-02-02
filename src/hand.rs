@@ -20,7 +20,6 @@ enum HandRank {
 }
 
 impl Ord for HandRank {
-    // TODO: De-dupe some cases / do all equality cases first?
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             // Matching ranks
@@ -156,37 +155,30 @@ fn try_get_straight_flush(descending_rank_cards: &Vec<Card>) -> Option<FiveCardH
 }
 
 fn try_get_four_of_a_kind(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
-    for start in 0..(descending_rank_cards.len() - 3) {
-        if descending_rank_cards[start] == descending_rank_cards[start + 3] {
-            let other_card = if start == 0 { descending_rank_cards[start + 4] } else { descending_rank_cards[0] };
-            
-            let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
-            cards[..4].copy_from_slice(&descending_rank_cards[start..start+4]);
-            cards[4] = other_card;
+    let cards_by_rank = group_by_rank(descending_rank_cards);
+    for quad_rank in Rank::high_to_low() {
+        if cards_by_rank[quad_rank].len() < 4 { continue; }
 
-            return Some(FiveCardHand {
-                cards, rank: HandRank::FourOfAKind(cards[0].rank), descending_rank_other_cards: vec![other_card]
-            });
-        }
+        let mut cards: Vec<Card> = cards_by_rank[quad_rank][..4].iter().copied().collect();
+        cards.extend(descending_rank_cards.iter().filter(|card| card.rank != quad_rank).take(1));
+        let cards = cards.try_into().unwrap();
+
+        return Some(FiveCardHand { cards, rank: HandRank::FourOfAKind(quad_rank), descending_rank_other_cards: Vec::from(&cards[4..]) });
     }
     None
 }
 
 fn try_get_full_house(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
-    let mut cards_by_rank: EnumMap<Rank, Vec<Card>> = EnumMap::default();
-    for card in descending_rank_cards {
-        cards_by_rank[card.rank].push(*card);
-    }
-
+    let cards_by_rank = group_by_rank(descending_rank_cards);
     for triple_rank in Rank::high_to_low() {
         if cards_by_rank[triple_rank].len() < 3 { continue; }
         for pair_rank in Rank::high_to_low() {
             if pair_rank == triple_rank { continue; }
             if cards_by_rank[pair_rank].len() < 2 { continue; }
 
-            let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
-            cards[..3].copy_from_slice(&cards_by_rank[triple_rank][..3]);
-            cards[3..].copy_from_slice(&cards_by_rank[pair_rank][..2]);
+            let mut cards: Vec<Card> = cards_by_rank[triple_rank][..3].iter().copied().collect();
+            cards.extend_from_slice(&cards_by_rank[pair_rank][..2]);
+            let cards = cards.try_into().unwrap();
 
             return Some(FiveCardHand { cards, rank: HandRank::FullHouse { triple_rank, pair_rank }, descending_rank_other_cards: vec![] });
         }
@@ -223,40 +215,31 @@ fn try_get_straight(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
     }
 
     // Ensures we don't consider a straight that would wrap around
-    let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
+    let mut cards = vec![];
     'high: for high_rank in [Rank::Ace, Rank::King, Rank::Queen, Rank::Jack, Rank::Ten, Rank::Nine, Rank::Eight,
         Rank::Seven, Rank::Six, Rank::Five, Rank::Five] {
         let mut current = high_rank;
-        for i in 0..5 {
+        for _ in 0..5 {
             match unique_ranks[current] {
-                Some(card) => cards[i] = *card,
+                Some(card) => cards.push(*card),
                 None => continue 'high, 
             }
             current = current.previous();
         }
+        let cards = cards.try_into().unwrap();
         return Some(FiveCardHand { cards, rank: HandRank::Straight { high_rank }, descending_rank_other_cards: vec![] });
     }
     None
 }
 
 fn try_get_three_of_a_kind(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
-    let mut cards_by_rank: EnumMap<Rank, Vec<Card>> = EnumMap::default();
-    for card in descending_rank_cards {
-        cards_by_rank[card.rank].push(*card);
-    }
-
+    let cards_by_rank = group_by_rank(descending_rank_cards);
     for triple_rank in Rank::high_to_low() {
         if cards_by_rank[triple_rank].len() < 3 { continue; }
 
-        let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
-        cards[..3].copy_from_slice(&cards_by_rank[triple_rank][..3]);
-        cards[3..].copy_from_slice(
-            &descending_rank_cards.iter()
-                .cloned()
-                .filter(|card| card.rank != triple_rank)
-                .take(2)
-                .collect::<Vec<_>>()
-        );
+        let mut cards: Vec<Card> = cards_by_rank[triple_rank][..3].iter().copied().collect();
+        cards.extend(descending_rank_cards.iter().filter(|card| card.rank != triple_rank).take(2));
+        let cards = cards.try_into().unwrap();
 
         return Some(FiveCardHand { cards, rank: HandRank::ThreeOfAKind(triple_rank), descending_rank_other_cards: Vec::from(&cards[3..]) });
     }
@@ -264,11 +247,7 @@ fn try_get_three_of_a_kind(descending_rank_cards: &Vec<Card>) -> Option<FiveCard
 }
 
 fn try_get_two_pair(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
-    let mut cards_by_rank: EnumMap<Rank, Vec<Card>> = EnumMap::default();
-    for card in descending_rank_cards {
-        cards_by_rank[card.rank].push(*card);
-    }
-
+    let cards_by_rank = group_by_rank(descending_rank_cards);
     for high_rank in Rank::high_to_low() {
         if cards_by_rank[high_rank].len() < 2 { continue; }
         for low_rank in Rank::high_to_low() {
@@ -280,10 +259,10 @@ fn try_get_two_pair(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
                 .next()
                 .expect("Could not find 5th card for two pair");
 
-            let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
-            cards[..2].copy_from_slice(&cards_by_rank[high_rank][..2]);
-            cards[2..4].copy_from_slice(&cards_by_rank[low_rank][..2]);
-            cards[4] = other_card;
+            let mut cards: Vec<Card> = cards_by_rank[high_rank][..2].iter().copied().collect();
+            cards.extend_from_slice(&cards_by_rank[low_rank][..2]);
+            cards.push(other_card);
+            let cards = cards.try_into().unwrap();
 
             return Some(FiveCardHand { cards, rank: HandRank::TwoPair { high_rank, low_rank }, descending_rank_other_cards: vec![other_card] });
         }
@@ -292,23 +271,13 @@ fn try_get_two_pair(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
 }
 
 fn try_get_pair(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
-    let mut cards_by_rank: EnumMap<Rank, Vec<Card>> = EnumMap::default();
-    for card in descending_rank_cards {
-        cards_by_rank[card.rank].push(*card);
-    }
-
+    let cards_by_rank = group_by_rank(descending_rank_cards);
     for pair_rank in Rank::high_to_low() {
         if cards_by_rank[pair_rank].len() < 2 { continue; }
 
-        let mut cards = [Card { rank: Rank::Ace, suit: Suit::Spades}; 5]; // placeholder initial value
-        cards[..2].copy_from_slice(&cards_by_rank[pair_rank][..2]);
-        cards[2..].copy_from_slice(
-            &descending_rank_cards.iter()
-                .cloned()
-                .filter(|card| card.rank != pair_rank)
-                .take(3)
-                .collect::<Vec<_>>()
-        );
+        let mut cards: Vec<Card> = cards_by_rank[pair_rank][..2].iter().copied().collect();
+        cards.extend(descending_rank_cards.iter().cloned().filter(|card| card.rank != pair_rank).take(3));
+        let cards = cards.try_into().unwrap();
 
         return Some(FiveCardHand { cards, rank: HandRank::Pair(pair_rank), descending_rank_other_cards: Vec::from(&cards[2..]) });
     }
@@ -319,6 +288,14 @@ fn get_high_card(descending_rank_cards: &Vec<Card>) -> FiveCardHand {
     let high_card = descending_rank_cards[0];
     let cards = descending_rank_cards[..5].try_into().expect("Found fewer than 5 cards");
     FiveCardHand { cards, rank: HandRank::HighCard(high_card.rank), descending_rank_other_cards: Vec::from(&descending_rank_cards[1..]) }
+}
+
+fn group_by_rank(cards: &Vec<Card>) -> EnumMap<Rank, Vec<Card>> {
+    let mut cards_by_rank: EnumMap<Rank, Vec<Card>> = EnumMap::default();
+    for card in cards {
+        cards_by_rank[card.rank].push(*card);
+    }
+    cards_by_rank
 }
 
 #[cfg(test)]
