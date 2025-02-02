@@ -89,57 +89,56 @@ mod hand {
         // TODO: De-dupe some cases / do all equality cases first?
         fn cmp(&self, other: &Self) -> Ordering {
             match (self, other) {
+                // Matching ranks
                 (HandRank::StraightFlush { high_rank: first_rank }, HandRank::StraightFlush { high_rank: second_rank })
-                    => first_rank.cmp(second_rank),    
-                (HandRank::StraightFlush { .. }, _) => Ordering::Greater,
-                (_, HandRank::StraightFlush { .. }) => Ordering::Less,
-
-
-                (HandRank::FourOfAKind(first_rank), HandRank::FourOfAKind(second_rank))
+                | (HandRank::FourOfAKind(first_rank), HandRank::FourOfAKind(second_rank))
+                | (HandRank::Straight { high_rank: first_rank }, HandRank::Straight { high_rank: second_rank })
+                | (HandRank::ThreeOfAKind(first_rank), HandRank::ThreeOfAKind(second_rank))
+                | (HandRank::Pair(first_rank), HandRank::Pair(second_rank))
+                | (HandRank::HighCard(first_rank), HandRank::HighCard(second_rank))
                     => first_rank.cmp(second_rank),
-                (HandRank::FourOfAKind(_), _) => Ordering::Greater,
-                (_, HandRank::FourOfAKind(_)) => Ordering::Less,
-
+                
                 (HandRank::FullHouse { triple_rank: first_triple, pair_rank: first_pair },
                     HandRank::FullHouse { triple_rank: second_triple, pair_rank: second_pair })
                     => {
                         let result = first_triple.cmp(second_triple);
                         if result != Ordering::Equal { result } else { first_pair.cmp(second_pair) }
                     },
-                (HandRank::FullHouse { .. }, _) => Ordering::Greater,
-                (_, HandRank::FullHouse { .. }) => Ordering::Less,
-
+                
                 (HandRank::Flush { ordered_ranks: first_ranks }, HandRank::Flush { ordered_ranks: second_ranks })
                     => compare_flushes(first_ranks, second_ranks),
-                (HandRank::Flush { .. }, _) => Ordering::Greater,
-                (_, HandRank::Flush { .. }) => Ordering::Less,
-
-                (HandRank::Straight { high_rank: first_rank }, HandRank::Straight { high_rank: second_rank })
-                    => first_rank.cmp(second_rank),
-                (HandRank::Straight { .. }, _) => Ordering::Greater,
-                (_, HandRank::Straight { .. }) => Ordering::Less,
-
-                (HandRank::ThreeOfAKind(first_rank), HandRank::ThreeOfAKind(second_rank))
-                    => first_rank.cmp(second_rank),
-                (HandRank::ThreeOfAKind(_), _) => Ordering::Greater,
-                (_, HandRank::ThreeOfAKind(_)) => Ordering::Less,
-
+                
                 (HandRank::TwoPair { high_rank: first_high, low_rank: first_low },
                     HandRank::TwoPair { high_rank: second_high, low_rank: second_low })
                     => {
                         let result: Ordering = first_high.cmp(second_high);
                         if result != Ordering::Equal { result } else { first_low.cmp(second_low) }
                     },
+ 
+                // Different ranks
+                (HandRank::StraightFlush { .. }, _) => Ordering::Greater,
+                (_, HandRank::StraightFlush { .. }) => Ordering::Less,
+
+                (HandRank::FourOfAKind(_), _) => Ordering::Greater,
+                (_, HandRank::FourOfAKind(_)) => Ordering::Less,
+                
+                (HandRank::FullHouse { .. }, _) => Ordering::Greater,
+                (_, HandRank::FullHouse { .. }) => Ordering::Less,
+                
+                (HandRank::Flush { .. }, _) => Ordering::Greater,
+                (_, HandRank::Flush { .. }) => Ordering::Less,
+
+                (HandRank::Straight { .. }, _) => Ordering::Greater,
+                (_, HandRank::Straight { .. }) => Ordering::Less,
+
+                (HandRank::ThreeOfAKind(_), _) => Ordering::Greater,
+                (_, HandRank::ThreeOfAKind(_)) => Ordering::Less,
+
                 (HandRank::TwoPair { .. }, _) => Ordering::Greater,
                 (_, HandRank::TwoPair { .. }) => Ordering::Less,
-
-                (HandRank::Pair(first_rank), HandRank::Pair(second_rank))
-                    => first_rank.cmp(second_rank),
+                
                 (HandRank::Pair(_), _) => Ordering::Greater,
                 (_, HandRank::Pair(_)) => Ordering::Less,
-
-                (HandRank::HighCard(first_rank), HandRank::HighCard(second_rank))
-                    => first_rank.cmp(second_rank),
             }
         }
     }
