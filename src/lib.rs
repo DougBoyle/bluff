@@ -54,10 +54,25 @@ mod card {
         Spades,
     }
 
+    impl Suit {
+        fn all() -> [Suit; 4] {
+            [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades]
+        }
+    }
+
     #[derive(Clone, Copy, Eq, PartialEq, Debug)]
     pub struct Card {
         pub rank: Rank,
         pub suit: Suit,
+    }
+
+    impl Card {
+        pub fn all() -> [Card; 52] {
+            Suit::all().into_iter()
+                .flat_map(|suit| Rank::high_to_low().map(|rank| Card { suit, rank }))
+                .collect::<Vec<_>>()
+                .try_into().unwrap()
+        }
     }
 }
 
@@ -67,8 +82,6 @@ mod hand {
     use enum_map::EnumMap;
 
     use crate::card::{Card, Rank, Suit};
-
-    struct Hand(Vec<Card>);
 
     /// Ties are broken first by the rank of cards making up the combination below, and then the rank of
     /// any other cards included to make up 5 cards.
@@ -150,7 +163,7 @@ mod hand {
     }
 
     #[derive(Debug, Eq, PartialEq)]
-    struct FiveCardHand {
+    pub struct FiveCardHand {
         cards: [Card; 5],
         rank: HandRank,
         descending_rank_other_cards: Vec<Card>,
@@ -177,7 +190,7 @@ mod hand {
         }
     }
 
-    fn rank_hand(cards: Vec<Card>) -> FiveCardHand {
+    pub fn rank_hand(cards: Vec<Card>) -> FiveCardHand {
         assert!(cards.len() >= 5);
 
         // TODO: Might be easier just to build per-rank and per-suit structures first, rather than in each check?
@@ -423,6 +436,45 @@ mod hand {
             let hand = rank_hand(cards);
 
             assert_matches!(hand, FiveCardHand { rank: HandRank::FullHouse { triple_rank: Rank::Queen, pair_rank: Rank::Eight }, .. });
+        }
+    }
+}
+
+pub mod game {
+    use rand::{seq::SliceRandom, Rng};
+
+    use crate::{card::Card, hand::{rank_hand, FiveCardHand}};
+
+    #[derive(Debug)]
+    pub struct GameCards {
+        player_cards: Vec<[Card; 2]>,
+        community_cards: [Card; 5],
+    }
+
+    impl GameCards {
+        pub fn new_random(players: u8) -> Option<GameCards> {
+            Self::new(players, rand::rng())
+        }
+
+        pub fn new(players: u8, mut rng: impl Rng) -> Option<GameCards> {
+            if players > 10 {
+                None // theoretic limit is (52-5)/2 = 23, but betting would be ridiculous.
+            } else {
+                let mut deck = Card::all();
+                deck.shuffle(&mut rng);
+                let players = players as usize;
+                let player_cards = (0..players)
+                    .map(|i| deck[2*i..2*(i+1)].try_into().unwrap())
+                    .collect::<Vec<[Card; 2]>>();
+                let community_cards = deck[2*players..2*players+5].try_into().unwrap();
+                Some(GameCards { player_cards, community_cards })
+            }
+        }
+
+        pub fn get_hand(&self, player: usize) -> FiveCardHand {
+            let mut cards = Vec::from(self.community_cards);
+            cards.extend_from_slice(&self.player_cards[player]);
+            rank_hand(cards)
         }
     }
 }
