@@ -215,9 +215,9 @@ fn try_get_straight(descending_rank_cards: &Vec<Card>) -> Option<FiveCardHand> {
     }
 
     // Ensures we don't consider a straight that would wrap around
-    let mut cards = vec![];
     'high: for high_rank in [Rank::Ace, Rank::King, Rank::Queen, Rank::Jack, Rank::Ten, Rank::Nine, Rank::Eight,
         Rank::Seven, Rank::Six, Rank::Five, Rank::Five] {
+        let mut cards = vec![];
         let mut current = high_rank;
         for _ in 0..5 {
             match unique_ranks[current] {

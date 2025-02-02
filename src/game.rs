@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet, fmt::Debug, thread::current};
 
-use rand::{seq::SliceRandom, Rng, RngCore};
+use rand::{rng, seq::SliceRandom, Rng, RngCore};
 
 use crate::{card::Card, hand::{rank_hand, FiveCardHand}};
 
@@ -83,7 +83,7 @@ pub enum Action {
     BigBlind, // Potentially going All-In
     Fold,
     CheckOrCall, // For call, includes going All-In
-    Raise(usize), // TODO: Tick size?
+    Raise(usize), // In terms of the chips for this phase, not the additional amount being raised. TODO: Tick size?
 }
 
 #[derive(Debug)]
@@ -220,8 +220,9 @@ impl Game {
             },
             Action::Raise(chips) => {
                 assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
-                assert!(chips > self.round.pot.current_raise);
-                let player_additional_chips = chips - self.round.pot.chips_by_player[player];
+                assert!(chips > self.round.pot.current_raise, "Raise to {chips} not greater than current raise {}", self.round.pot.current_raise);
+                self.round.pot.inc_current_raise(chips - self.round.pot.current_raise);
+                let player_additional_chips = self.round.pot.current_player_total - self.round.pot.chips_by_player[player];
                 // TODO: Tick size
                 assert!(player_additional_chips <= self.player_chips[player]);
                 self.inc_bet(player, player_additional_chips);
@@ -436,26 +437,69 @@ impl Game {
 
 /// TODO: Run the automated parts of the game, split out options/receive and validate inputs for the actions each player can perform.
 /// In future, may dispatch these actions / waiting for responses to different subprocesses.
-struct GameRunner(Game);
+pub struct GameRunner(Game);
 
 impl GameRunner {
-    fn run(mut game: Game) {
+    pub fn run(mut game: Game) {
+        let mut rng = rng();
         while game.round.phase != GamePhase::Finished {
             let player = game.round.next_player;
-            let Pot { current_raise, current_player_total, chips_by_player, .. } = &game.round.pot;
+            let Pot { current_raise, current_player_total, total, chips_by_player, .. } = &game.round.pot;
             let current_chips_bet = chips_by_player[player];
             let chips_required = current_player_total - current_chips_bet;
             let available_chips = game.player_chips[player];
 
-            if chips_required > available_chips {
-                println!("Player {player}: [All In ({available_chips})] [Fold]");
-            } else if chips_required > 0 {
-                println!("Player {player}: [Call ({chips_required})] [Raise (up to {available_chips})] [Fold]");
-            } else {
-                println!("Player {player}: [Check] [Raise (up to {available_chips})] [Fold]");
-            }
+            let can_raise = game.round.active_players.len() > 1; // otherwise, all remaining players already All-In
 
-            // TODO: Play a valid action based on the above
+            println!("Player {player}: Pot = {total}, Current raise = {current_raise} (+{chips_required}), Chips remaining = {available_chips}");
+            let action = if chips_required >= available_chips {
+                println!("Player {player}: [All In ({available_chips})] [Fold]");
+                if rng.random_bool(0.5) {
+                    Action::CheckOrCall
+                } else {
+                    Action::Fold
+                }
+            } else {
+                if can_raise {
+                    let max_raise_total = current_raise + available_chips - chips_required;
+                    if chips_required > 0 {
+                        println!("Player {player}: [Call ({chips_required})] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]");
+                        if rng.random_bool(0.7) {
+                            Action::CheckOrCall
+                        } else if rng.random_bool(0.9) {
+                            Action::Raise(rng.random_range(current_raise + 1..=max_raise_total))
+                        } else {
+                            Action::Fold
+                        }
+                    } else {
+                        println!("Player {player}: [Check] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]");
+                        if rng.random_bool(0.5) {
+                            Action::CheckOrCall
+                        } else if rng.random_bool(0.9) {
+                            Action::Raise(rng.random_range(chips_required + 1..=available_chips))
+                        } else {
+                            Action::Fold
+                        }
+                    }
+                } else {
+                    if chips_required > 0 {
+                        println!("Player {player}: [Call ({chips_required})] [Fold]");
+                        if rng.random_bool(0.9) {
+                            Action::CheckOrCall
+                        } else {
+                            Action::Fold
+                        }
+                    } else { // This case might never be possible?
+                        println!("Player {player}: [Check] [Fold]");
+                        if rng.random_bool(0.95) {
+                            Action::CheckOrCall
+                        } else {
+                            Action::Fold
+                        }
+                    }
+                }
+            };
+
             game.handle_action(action, player);
         }
     }

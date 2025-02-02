@@ -1,4 +1,4 @@
-use bluff::game::{Action, Game, GameCards};
+use bluff::game::{Action, Game, GameCards, GameRunner};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -41,4 +41,7 @@ fn main() {
     game.handle_action(Action::CheckOrCall, 0);
 
     println!("Game state: {game:?}");
+
+    let rng = Box::new(StdRng::seed_from_u64(1));
+    GameRunner::run(Game::new(4, 100, 5, rng, Box::new(|s| println!("< {s}"))));
 }
