@@ -9,7 +9,7 @@ fn main() {
     println!("Game cards: {:#?}", game_cards);
     println!("Player 1 hand: {:#?}", game_cards.get_hand(0));
 
-    let rng = StdRng::seed_from_u64(1);
+    let rng = Box::new(StdRng::seed_from_u64(1));
 
     println!("Poker game:");
     let mut game = Game::new(4, 100, 5, rng, Box::new(|s| println!("< {s}")));

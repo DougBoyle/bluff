@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet, fmt::Debug};
 
-use rand::{rngs::ThreadRng, seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngCore};
 
 use crate::{card::Card, hand::{rank_hand, FiveCardHand}};
 
@@ -117,17 +117,19 @@ impl Round {
     }
 }
 
+type Random = Box<dyn RngCore>;
+
 // TODO: How to handle players going all-in/running out of chips?
-pub struct Game<R: Rng> {
+pub struct Game {
     player_chips: Vec<usize>,
     small_blind: usize, // TODO: Increase over time?
     dealer: usize,
     round: Round,
-    rng: R,
+    rng: Random,
     output: Output,
 }
 
-impl<R: Rng> Debug for Game<R> {
+impl Debug for Game {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Game")
             .field("player_chips", &self.player_chips)
@@ -138,15 +140,15 @@ impl<R: Rng> Debug for Game<R> {
     }
 }
 
-impl Game<ThreadRng> {
+impl Game {
     pub fn new_random(players: usize, initial_chips: usize, small_blind: usize, output: Output) -> Self {
-        let rng = rand::rng();
+        let rng = Box::new(rand::rng());
         Game::new(players, initial_chips, small_blind, rng, output)
     }
 }
 
-impl<R: Rng> Game<R> {
-    pub fn new(players: usize, initial_chips: usize, small_blind: usize, mut rng: R, output: Output) -> Game<R> {
+impl Game {
+    pub fn new(players: usize, initial_chips: usize, small_blind: usize, mut rng: Random, output: Output) -> Game {
         let dealer = 0; // TODO: Vary this?
         let small_blind_player = 1;
         let active_players: HashSet<usize> = (0..players).collect();
@@ -431,3 +433,5 @@ impl<R: Rng> Game<R> {
         self.player_chips.len()
     }
 }
+
+struct GameRunner(Game);
