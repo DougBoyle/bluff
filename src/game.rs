@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashSet, fmt::Debug};
+use std::{cmp::Ordering, collections::HashSet, fmt::Debug, thread::current};
 
 use rand::{seq::SliceRandom, Rng, RngCore};
 
@@ -434,4 +434,29 @@ impl Game {
     }
 }
 
+/// TODO: Run the automated parts of the game, split out options/receive and validate inputs for the actions each player can perform.
+/// In future, may dispatch these actions / waiting for responses to different subprocesses.
 struct GameRunner(Game);
+
+impl GameRunner {
+    fn run(mut game: Game) {
+        while game.round.phase != GamePhase::Finished {
+            let player = game.round.next_player;
+            let Pot { current_raise, current_player_total, chips_by_player, .. } = &game.round.pot;
+            let current_chips_bet = chips_by_player[player];
+            let chips_required = current_player_total - current_chips_bet;
+            let available_chips = game.player_chips[player];
+
+            if chips_required > available_chips {
+                println!("Player {player}: [All In ({available_chips})] [Fold]");
+            } else if chips_required > 0 {
+                println!("Player {player}: [Call ({chips_required})] [Raise (up to {available_chips})] [Fold]");
+            } else {
+                println!("Player {player}: [Check] [Raise (up to {available_chips})] [Fold]");
+            }
+
+            // TODO: Play a valid action based on the above
+            game.handle_action(action, player);
+        }
+    }
+}
