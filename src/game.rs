@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, fmt::Debug};
+use std::{cmp::Ordering, collections::HashSet, fmt::Debug};
 
 use rand::{rngs::ThreadRng, seq::SliceRandom, Rng};
 
@@ -89,24 +89,26 @@ pub enum Action {
 #[derive(Debug)]
 struct Round {
     pot: Pot,
+    active_players: HashSet<usize>, // Players that still have chips + haven't folded
     cards: GameCards,
     phase: GamePhase,
-    phase_ends_on_player: usize, // After big blind initially, the after dealer on later rounds, else the last player to raise
+    phase_ends_on_player: usize, // Meaningless until after big blind. Otherwise, the last player to raise, or first to go if no raises yet.
     next_player: usize, // the player we are currently waiting on
     folded_players: Vec<bool>,
 }
 
 impl Round {
     pub fn new(
-        players: usize,
+        players: usize, // total number of players originally in game
+        active_players: HashSet<usize>, // just those players that still have chips
         small_blind: usize,
         small_blind_player: usize,
-        after_big_blind_player: usize,
         rng: &mut impl Rng
     ) -> Round {
         Round {
             pot: Pot::new(players, small_blind),
-            phase_ends_on_player: after_big_blind_player,
+            active_players,
+            phase_ends_on_player: 0,
             next_player: small_blind_player,
             phase: GamePhase::SmallBlind,
             cards: GameCards::new(players, rng).unwrap(),
@@ -147,12 +149,12 @@ impl<R: Rng> Game<R> {
     pub fn new(players: usize, initial_chips: usize, small_blind: usize, mut rng: R, output: Output) -> Game<R> {
         let dealer = 0; // TODO: Vary this?
         let small_blind_player = 1;
-        let after_big_blind = 3 % players;
+        let active_players: HashSet<usize> = (0..players).collect();
         let mut game = Game {
             player_chips: vec![initial_chips; players],
             small_blind,
             dealer,
-            round: Round::new(players, small_blind, small_blind_player, after_big_blind, &mut rng),
+            round: Round::new(players, active_players, small_blind, small_blind_player, &mut rng),
             rng,
             output
         };
@@ -176,9 +178,7 @@ impl<R: Rng> Game<R> {
         assert!(player == self.round.next_player);
         assert!(self.round.phase != GamePhase::Finished);
         match action {
-            // TODO: Need some output to indicate actions being played.
-            //       At a minimum, 'Small/Big blind',
-            //       ideally also chips played / if all in.
+            // TODO: Output should indicate when a player has gone all in
             Action::SmallBlind => {
                 assert_eq!(GamePhase::SmallBlind, self.round.phase);
                 let bet = self.round.pot.current_player_total.min(self.player_chips[player]);
@@ -206,29 +206,18 @@ impl<R: Rng> Game<R> {
                     (self.output)(format!("Player {player} checked"));
                 }
 
-                // TODO: If only one player left, doesn't make sense to give them a turn!
-                // TODO: Need to de-dupe some of this next/player_after code.
-                let mut next = (player + 1) % self.player_chips.len();
-                while (self.player_chips[next] == 0 || self.round.folded_players[next])
-                    && next != self.round.phase_ends_on_player {
-                    next = (next + 1) % self.player_chips.len();
-                }
-                if next == self.round.phase_ends_on_player {
+                if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
                     return;
                 }
 
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while (self.player_chips[player_after] == 0 || self.round.folded_players[next]) && player_after != next {
-                    player_after = (player_after + 1) % self.player_chips.len();
+                match self.next_player_to_act_after(player) {
+                    None => self.handle_end_of_phase(),
+                    Some(next) => self.round.next_player = next,
                 }
-                if player_after == next {
-                    self.handle_end_of_phase();
-                    return;
-                }
-                self.round.next_player = next;
             },
             Action::Raise(chips) => {
+                assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
                 assert!(chips > self.round.pot.current_raise);
                 let player_additional_chips = chips - self.round.pot.chips_by_player[player];
                 // TODO: Tick size
@@ -238,40 +227,23 @@ impl<R: Rng> Game<R> {
                 self.round.pot.inc_current_raise(chips - self.round.pot.current_raise);
                 self.round.phase_ends_on_player = player;
 
-                let mut next = (player + 1) % self.player_chips.len();
-                while (self.player_chips[next] == 0 || self.round.folded_players[next])
-                    && next != player {
-                    next = (next + 1) % self.player_chips.len();
-                }
-                // TODO: Should guard against client attempting this?
-                if next == player { panic!("Raised but nobody else left playing?") }
-                self.round.next_player = next;
+                self.round.next_player = self.next_player_to_act_after(player).expect("Raised but nobody else left playing?");
             },
             Action::Fold => {
                 assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
                 self.round.folded_players[player] = true;
+                self.round.active_players.remove(&player);
                 (self.output)(format!("Player {player} folded"));
 
-                let mut next = (player + 1) % self.player_chips.len();
-                while (self.player_chips[next] == 0 || self.round.folded_players[next])
-                    && next != self.round.phase_ends_on_player {
-                    next = (next + 1) % self.player_chips.len();
-                }
-                if next == self.round.phase_ends_on_player {
+                if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
                     return;
                 }
 
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while (self.player_chips[player_after] == 0 || self.round.folded_players[next]) && player_after != next {
-                    player_after = (player_after + 1) % self.player_chips.len();
+                match self.next_player_to_act_after(player) {
+                    None => self.handle_end_of_phase(),
+                    Some(next) => self.round.next_player = next,
                 }
-                if player_after == next {
-                    self.handle_end_of_phase();
-                    return;
-                }
-
-                self.round.next_player = next;
             }
         }
     }
@@ -296,49 +268,26 @@ impl<R: Rng> Game<R> {
             GamePhase::BigBlind => {
                 self.round.phase = GamePhase::PreFlop;
 
-                // TODO: Also doesn't make sense if only one player left in? See 'player_after' below.
-                let mut next = (self.round.next_player + 1) % self.player_chips.len();
-                while self.player_chips[next] == 0 {
-                    next = (next + 1) % self.player_chips.len();
-                    if next == self.round.next_player {
-                        self.handle_end_of_phase();
-                        return;
-                    }
+                if self.round.active_players.len() < 2 {
+                    self.handle_end_of_phase();
+                    return;
                 }
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while self.player_chips[player_after] == 0 {
-                    player_after = (player_after + 1) % self.player_chips.len();
-                    if player_after == next {
-                        self.handle_end_of_phase();
-                        return;
-                    }
-                }
+
+                let next = self.player_with_chips_not_folded_after(self.round.next_player).unwrap();
                 self.round.next_player = next;
+                self.round.phase_ends_on_player = next;
             },
             GamePhase::PreFlop => {
                 (self.output)(self.round.cards.community_cards[..3].iter().map(|card| card.to_string()).collect());
                 self.round.phase = GamePhase::Flop;
                 self.round.pot.reset_current_raise();
-                // TODO: Simplify tracking next player!
-                let initial_next = (self.dealer + 1) % self.player_chips.len();
-                let mut next = initial_next;
-                while self.player_chips[next] == 0 || self.round.folded_players[next] {
-                    next = (next + 1) % self.player_chips.len();
-                    if next == initial_next {
-                        self.handle_end_of_phase();
-                        return;
-                    }
-                }
 
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while (self.player_chips[player_after] == 0 || self.round.folded_players[next]) && player_after != next {
-                    player_after = (player_after + 1) % self.player_chips.len();
-                }
-                if player_after == next {
+                if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
                     return;
                 }
 
+                let next = self.player_with_chips_not_folded_after(self.dealer).unwrap();
                 self.round.next_player = next;
                 self.round.phase_ends_on_player = next;
             },
@@ -346,26 +295,13 @@ impl<R: Rng> Game<R> {
                 (self.output)(self.round.cards.community_cards[3].to_string());
                 self.round.phase = GamePhase::Turn;
                 self.round.pot.reset_current_raise();
-                // TODO: Simplify tracking next player!
-                let initial_next = (self.dealer + 1) % self.player_chips.len();
-                let mut next = initial_next;
-                while self.player_chips[next] == 0 || self.round.folded_players[next] {
-                    next = (next + 1) % self.player_chips.len();
-                    if next == initial_next {
-                        self.handle_end_of_phase();
-                        return;
-                    }
-                }
 
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while (self.player_chips[player_after] == 0 || self.round.folded_players[next]) && player_after != next {
-                    player_after = (player_after + 1) % self.player_chips.len();
-                }
-                if player_after == next {
+                if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
                     return;
                 }
 
+                let next = self.player_with_chips_not_folded_after(self.dealer).unwrap();
                 self.round.next_player = next;
                 self.round.phase_ends_on_player = next;
             },
@@ -373,26 +309,13 @@ impl<R: Rng> Game<R> {
                 (self.output)(self.round.cards.community_cards[4].to_string());
                 self.round.phase = GamePhase::River;
                 self.round.pot.reset_current_raise();
-                // TODO: Simplify tracking next player!
-                let initial_next = (self.dealer + 1) % self.player_chips.len();
-                let mut next = initial_next;
-                while self.player_chips[next] == 0 || self.round.folded_players[next] {
-                    next = (next + 1) % self.player_chips.len();
-                    if next == initial_next {
-                        self.handle_end_of_phase();
-                        return;
-                    }
-                }
 
-                let mut player_after = (next + 1) % self.player_chips.len();
-                while (self.player_chips[player_after] == 0 || self.round.folded_players[next]) && player_after != next {
-                    player_after = (player_after + 1) % self.player_chips.len();
-                }
-                if player_after == next {
+                if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
                     return;
                 }
 
+                let next = self.player_with_chips_not_folded_after(self.dealer).unwrap();
                 self.round.next_player = next;
                 self.round.phase_ends_on_player = next;
             },
@@ -427,7 +350,12 @@ impl<R: Rng> Game<R> {
                 }
 
                 // Game over
-                if self.player_chips.iter().filter(|&&chips| chips > 0).count() < 2 {
+                let active_players: HashSet<usize> = self.player_chips.iter().enumerate()
+                    .filter(|(_, &chips)| chips > 0)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                if active_players.len() < 2 {
                     (self.output)("Game over".to_string());
                     self.round.phase = GamePhase::Finished;
                     return;
@@ -436,29 +364,15 @@ impl<R: Rng> Game<R> {
                 (self.output)("New round...".to_string());
 
                 // Otherwise, set up next round
-                // TODO: Find a better way of calculating next player!
-                let mut next_dealer = (self.dealer + 1) % self.player_chips.len();
-                while self.player_chips[next_dealer] == 0 {
-                    next_dealer = (next_dealer + 1) % self.player_chips.len();
-                }
+                let next_dealer = self.player_with_chips_after(self.dealer).unwrap();
+                let next_small_blind_player = self.player_with_chips_after(next_dealer).unwrap();
+
                 self.dealer = next_dealer;
-                let mut small_blind_player = (next_dealer + 1) % self.player_chips.len();
-                while self.player_chips[small_blind_player] == 0 {
-                    small_blind_player = (small_blind_player + 1) % self.player_chips.len();
-                }
-                let mut big_blind_player = (small_blind_player + 1) % self.player_chips.len();
-                while self.player_chips[big_blind_player] == 0 {
-                    big_blind_player = (big_blind_player + 1) % self.player_chips.len();
-                }
-                let mut after_big_blind = (big_blind_player + 1) % self.player_chips.len();
-                while self.player_chips[after_big_blind] == 0 {
-                    after_big_blind = (after_big_blind + 1) % self.player_chips.len();
-                }
                 self.round = Round::new(
                     self.player_chips.len(),
+                    active_players,
                     self.small_blind,
-                    small_blind_player,
-                    after_big_blind,
+                    next_small_blind_player,
                     &mut self.rng
                 );
 
@@ -468,8 +382,52 @@ impl<R: Rng> Game<R> {
         }
     }
 
+    /// Expects at least 2 players to have chips left (else we have a winner).
+    /// Only use between rounds. Within a round, need to care if the player has folded.
+    fn player_with_chips_after(&self, player: usize) -> Option<usize> {
+        let mut next = (player + 1) % self.num_players();
+        while self.player_chips[next] == 0 {
+            next = (next + 1) % self.num_players();
+            if next == player { return None; }
+        }
+        Some(next)
+    }
+
+    /// Should only be used between phases of a round.
+    /// Cannot be used at the end of a round, when folded or not is meaningless.
+    /// Cannot be used within a phase, when we need to consider the last player to act before advancing.
+    fn player_with_chips_not_folded_after(&self, player: usize) -> Option<usize> {
+        let mut next = (player + 1) % self.num_players();
+        while !self.round.active_players.contains(&next) {
+            next = (next + 1) % self.num_players();
+            if next == player { return None; }
+        }
+        Some(next)
+    }
+
+    /// The next player to act within the current betting phase.
+    /// Must have chips, have not folded, and be before the first player to act/latest player to raise.
+    fn next_player_to_act_after(&self, player: usize) -> Option<usize> {
+        let mut next = (player + 1) % self.num_players();
+        if next == self.round.phase_ends_on_player { return None; }
+
+        while !self.round.active_players.contains(&next) {
+            next = (next + 1) % self.num_players();
+            if next == self.round.phase_ends_on_player { return None; }
+        }
+
+        Some(next)
+    }
+
     fn inc_bet(&mut self, player: usize, bet: usize) {
         self.player_chips[player] -= bet;
+        if self.player_chips[player] == 0 {
+            self.round.active_players.remove(&player);
+        }
         self.round.pot.inc_bet(player, bet);
+    }
+
+    fn num_players(&self) -> usize {
+        self.player_chips.len()
     }
 }
