@@ -490,6 +490,8 @@ impl Game {
 /// In future, may dispatch these actions / waiting for responses to different subprocesses.
 pub struct GameRunner {
     num_players: usize,
+    // Shared between the 'RunnerListener' processing output from the game and passing back to players,
+    // and the 'GameRunner' itself asking each player to move it wants to make.
     players: Rc<RefCell<Vec<Box<dyn Player>>>>,
 }
 
@@ -531,20 +533,19 @@ impl GameRunner {
 
             let can_raise = game.round.active_players.len() > 1; // otherwise, all remaining players already All-In
 
-            let action = loop {
-                let action = self.players.borrow_mut()[player].select_action(PlayerInput::new(&game.round.pot, &game.player_chips, &game.round.active_players));
-                let valid = match action {
-                    Action::SmallBlind | Action::BigBlind => false, // automated, not an action a player can pick
-                    Action::Fold | Action::CheckOrCall => true,
-                    Action::Raise(new_raise_total) =>
-                        can_raise && new_raise_total > *current_raise && (new_raise_total <= current_raise - chips_required + available_chips),
-                };
-                if valid {
-                    break action;
-                } else {
-                    let error = Event::InvalidAction { player, description: format!("Invalid action {action:?}") };
-                    listener.borrow().handle_event(&error);
-                }
+            let action = self.players.borrow_mut()[player].select_action(PlayerInput::new(&game.round.pot, &game.player_chips, &game.round.active_players));
+            let valid = match action {
+                Action::SmallBlind | Action::BigBlind => false, // automated, not an action a player can pick
+                Action::Fold | Action::CheckOrCall => true,
+                Action::Raise(new_raise_total) =>
+                    can_raise && new_raise_total > *current_raise && (new_raise_total <= current_raise - chips_required + available_chips),
+            };
+            let action = if valid {
+                action
+            } else {
+                let error = Event::InvalidAction { player, description: format!("Invalid action {action:?}, will fold") };
+                listener.borrow().handle_event(&error);
+                Action::Fold
             };
 
             game.handle_action(action, player);
