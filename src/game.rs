@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, collections::HashSet, fmt::Debug, thread::current};
+use std::{cell::RefCell, cmp::Ordering, collections::HashSet, fmt::Debug, rc::Rc};
 
-use rand::{rng, seq::SliceRandom, Rng, RngCore};
+use rand::{seq::SliceRandom, Rng, RngCore};
 
 use crate::{card::Card, hand::{rank_hand, FiveCardHand}};
 
@@ -41,17 +41,17 @@ impl GameCards {
 struct Pot {
     current_raise: usize, // amount bet per-player this phase, mainly to tell UI
     current_player_total: usize, // cumulative total across phases, matching chips_by_player
-    chips_by_player: Vec<usize>,
+    chips_bet_by_player: Vec<usize>,
     total: usize,
 }
 
 impl Pot {
     fn new(players: usize, small_blind: usize) -> Pot {
-        Pot { current_raise: small_blind, current_player_total: small_blind, chips_by_player: vec![0; players], total: 0 }
+        Pot { current_raise: small_blind, current_player_total: small_blind, chips_bet_by_player: vec![0; players], total: 0 }
     }
 
     fn inc_bet(&mut self, player: usize, bet: usize) {
-        self.chips_by_player[player] += bet;
+        self.chips_bet_by_player[player] += bet;
         self.total += bet;
     }
 
@@ -76,8 +76,59 @@ enum GamePhase {
     Finished,
 }
 
-type Output = Box<dyn FnMut(String)>; // TODO: Probably want something more concrete here
+pub enum Event {
+    PlayerCards { player: usize, cards: [Card; 2] },
+    CommunityCards {cards: Vec<Card> },
+    SmallBlind { player: usize, chips_added: usize },
+    BigBlind { player: usize, chips_added: usize },
+    Check { player: usize },
+    Call { player: usize, chips_added: usize },
+    Raise { player: usize, round_new_raise: usize, chips_added: usize },
+    Fold { player: usize },
+    RoundWinner { player: usize, chips_won: usize },
+    NewRoundStarting,
+    GameOver { winning_player: usize },
+    InvalidAction { player: usize, description: String },
+}
 
+pub trait Listener {
+    fn handle_event(&self, event: &Event);
+}
+
+impl<T: Listener> Listener for Rc<RefCell<T>> {
+    fn handle_event(&self, event: &Event) {
+        self.borrow().handle_event(event);
+    }
+}
+
+pub type Output = Box<dyn Listener>;
+
+pub fn print_event(event: &Event) {
+    println!("< {}", match event {
+        Event::PlayerCards { player, cards } => format!("Player {player}: {}, {}", cards[0], cards[1]),
+        Event::CommunityCards { cards } => cards.iter().map(|card| card.to_string()).collect::<String>(),
+        Event::SmallBlind { player, chips_added } => format!("Small blind: Player {player}, added {chips_added} chips"),
+        Event::BigBlind { player, chips_added } => format!("Big blind: Player {player}, added {chips_added} chips"),
+        Event::Check { player } => format!("Player {player} checked"),
+        Event::Call { player, chips_added } => format!("Player {player} called, added {chips_added} chips"),
+        Event::Raise { player, round_new_raise, chips_added } => format!("Player {player} raised to {round_new_raise}, added {chips_added} chips"),
+        Event::Fold { player } => format!("Player {player} folded"),
+        Event::RoundWinner { player, chips_won } => format!("Player {player} won round, won {chips_won} chips"),
+        Event::NewRoundStarting => "New round starting...".to_string(),
+        Event::GameOver { winning_player } => format!("Game over, player {winning_player} won"),
+        Event::InvalidAction { player, description } => format!("!! INVALID ACTION, Player={player}: {description}"),
+    });
+}
+
+pub struct PrinterListener;
+
+impl Listener for PrinterListener {
+    fn handle_event(&self, event: &Event) {
+        print_event(event);
+    }
+}
+
+#[derive(Debug)]
 pub enum Action {
     SmallBlind, // Potentially going All-In
     BigBlind, // Potentially going All-In
@@ -169,8 +220,8 @@ impl Game {
     // TODO: In event both players end up all-in, this can automatically play through the whole game.
     //       Better to queue up follow up actions in some sort of PendingAction state? Then top-level can check that.
     fn play_initial_blinds(&mut self) {
-        for (i, cards) in self.round.cards.player_cards.iter().enumerate() {
-            (self.output)(format!("Player {i}: {}, {}", cards[0], cards[1]));
+        for (player, cards) in self.round.cards.player_cards.iter().enumerate() {
+            self.output.handle_event(&Event::PlayerCards { player, cards: cards.clone() });
         }
         self.handle_action(Action::SmallBlind, self.round.next_player);
         self.handle_action(Action::BigBlind, self.round.next_player);
@@ -183,29 +234,29 @@ impl Game {
             // TODO: Output should indicate when a player has gone all in
             Action::SmallBlind => {
                 assert_eq!(GamePhase::SmallBlind, self.round.phase);
-                let bet = self.round.pot.current_player_total.min(self.player_chips[player]);
-                (self.output)(format!("Small blind: Player {player} bet {bet}"));
-                assert!(bet > 0);
-                self.inc_bet(player, bet);
+                let chips_added = self.round.pot.current_player_total.min(self.player_chips[player]);
+                self.output.handle_event(&Event::SmallBlind { player, chips_added });
+                assert!(chips_added > 0);
+                self.inc_bet(player, chips_added);
                 self.handle_end_of_phase();
             },
             Action::BigBlind => {
                 assert_eq!(GamePhase::BigBlind, self.round.phase);
-                let bet = self.round.pot.current_player_total.min(self.player_chips[player]);
-                assert!(bet > 0);
-                (self.output)(format!("Big blind: Player {player} bet {bet}"));
-                self.inc_bet(player, bet);
+                let chips_added = self.round.pot.current_player_total.min(self.player_chips[player]);
+                assert!(chips_added > 0);
+                self.output.handle_event(&Event::BigBlind { player, chips_added });
+                self.inc_bet(player, chips_added);
                 self.handle_end_of_phase();
             },
             Action::CheckOrCall => {
                 assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
-                let bet = self.round.pot.current_player_total - self.round.pot.chips_by_player[player];
-                let bet = bet.min(self.player_chips[player]);
-                if bet > 0 {
-                    self.inc_bet(player, bet);
-                    (self.output)(format!("Player {player} called, bet {bet}"));
+                let chips_added = self.round.pot.current_player_total - self.round.pot.chips_bet_by_player[player];
+                let chips_added = chips_added.min(self.player_chips[player]);
+                if chips_added > 0 {
+                    self.inc_bet(player, chips_added);
+                    self.output.handle_event(&Event::Call { player, chips_added });
                 } else {
-                    (self.output)(format!("Player {player} checked"));
+                    self.output.handle_event(&Event::Check { player });
                 }
 
                 if self.round.active_players.len() < 2 {
@@ -218,16 +269,15 @@ impl Game {
                     Some(next) => self.round.next_player = next,
                 }
             },
-            Action::Raise(chips) => {
+            Action::Raise(round_new_raise) => {
                 assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
-                assert!(chips > self.round.pot.current_raise, "Raise to {chips} not greater than current raise {}", self.round.pot.current_raise);
-                self.round.pot.inc_current_raise(chips - self.round.pot.current_raise);
-                let player_additional_chips = self.round.pot.current_player_total - self.round.pot.chips_by_player[player];
+                assert!(round_new_raise > self.round.pot.current_raise, "Raise to {round_new_raise} not greater than current raise {}", self.round.pot.current_raise);
+                self.round.pot.inc_current_raise(round_new_raise - self.round.pot.current_raise);
+                let chips_added = self.round.pot.current_player_total - self.round.pot.chips_bet_by_player[player];
                 // TODO: Tick size
-                assert!(player_additional_chips <= self.player_chips[player]);
-                self.inc_bet(player, player_additional_chips);
-                (self.output)(format!("Player {player} raised to {chips}, bet {player_additional_chips}"));
-                self.round.pot.inc_current_raise(chips - self.round.pot.current_raise);
+                assert!(chips_added <= self.player_chips[player]);
+                self.inc_bet(player, chips_added);
+                self.output.handle_event(&Event::Raise { player, round_new_raise, chips_added });
                 self.round.phase_ends_on_player = player;
 
                 self.round.next_player = self.next_player_to_act_after(player).expect("Raised but nobody else left playing?");
@@ -236,7 +286,7 @@ impl Game {
                 assert!(self.round.phase != GamePhase::SmallBlind && self.round.phase != GamePhase::BigBlind);
                 self.round.folded_players[player] = true;
                 self.round.active_players.remove(&player);
-                (self.output)(format!("Player {player} folded"));
+                self.output.handle_event(&Event::Fold { player });
 
                 if self.round.active_players.len() < 2 {
                     self.handle_end_of_phase();
@@ -281,7 +331,7 @@ impl Game {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::PreFlop => {
-                (self.output)(self.round.cards.community_cards[..3].iter().map(|card| card.to_string()).collect());
+                self.output.handle_event(&Event::CommunityCards { cards: self.round.cards.community_cards[..3].iter().copied().collect() });
                 self.round.phase = GamePhase::Flop;
                 self.round.pot.reset_current_raise();
 
@@ -295,7 +345,7 @@ impl Game {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::Flop => {
-                (self.output)(self.round.cards.community_cards[..4].iter().map(|card| card.to_string()).collect());
+                self.output.handle_event(&Event::CommunityCards { cards: self.round.cards.community_cards[..4].iter().copied().collect() });
                 self.round.phase = GamePhase::Turn;
                 self.round.pot.reset_current_raise();
 
@@ -309,7 +359,7 @@ impl Game {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::Turn => {
-                (self.output)(self.round.cards.community_cards.iter().map(|card| card.to_string()).collect());
+                self.output.handle_event(&Event::CommunityCards { cards: self.round.cards.community_cards.iter().copied().collect() });
                 self.round.phase = GamePhase::River;
                 self.round.pot.reset_current_raise();
 
@@ -323,7 +373,7 @@ impl Game {
                 self.round.phase_ends_on_player = next;
             },
             GamePhase::River => {
-                let mut hands: Vec<(usize, FiveCardHand)> = self.round.pot.chips_by_player.iter().enumerate()
+                let mut hands: Vec<(usize, FiveCardHand)> = self.round.pot.chips_bet_by_player.iter().enumerate()
                     .filter(|(i, chips)| !self.round.folded_players[*i] && **chips > 0)
                     .map(|(i, _)| (i, self.round.cards.get_hand(i)))
                     .collect();
@@ -335,9 +385,9 @@ impl Game {
                     let mut winners = 1;
                     while winners < hands.len() && hands[winners].1.cmp(&hands[0].1) == Ordering::Equal { winners += 1 };
                     let winning_players: Vec<_> = hands[..winners].iter().map(|(i, _)| i).collect();
-                    let max_player_chips = winning_players.iter().map(|&&i| self.round.pot.chips_by_player[i]).min().unwrap();
+                    let max_player_chips = winning_players.iter().map(|&&i| self.round.pot.chips_bet_by_player[i]).min().unwrap();
                     let mut chips_won = 0;
-                    for chips in self.round.pot.chips_by_player.iter_mut() {
+                    for chips in self.round.pot.chips_bet_by_player.iter_mut() {
                         let deducted = max_player_chips.min(*chips);
                         *chips -= deducted;
                         self.round.pot.total -= deducted;
@@ -345,11 +395,11 @@ impl Game {
                     }
                     // Possible rounding here, excess chips go to the house!
                     let chips_won = chips_won / winners;
-                    for &winner in winning_players {
-                        (self.output)(format!("Player {winner} won {chips_won}"));
-                        self.player_chips[winner] += chips_won;
+                    for &player in winning_players {
+                        self.output.handle_event(&Event::RoundWinner { player, chips_won });
+                        self.player_chips[player] += chips_won;
                     }
-                    hands = hands.into_iter().filter(|(i, _)| self.round.pot.chips_by_player[*i] > 0).collect();
+                    hands = hands.into_iter().filter(|(i, _)| self.round.pot.chips_bet_by_player[*i] > 0).collect();
                 }
 
                 // Game over
@@ -359,12 +409,13 @@ impl Game {
                     .collect();
 
                 if active_players.len() < 2 {
-                    (self.output)("Game over".to_string());
+                    let winning_player = *active_players.iter().next().unwrap();
+                    self.output.handle_event(&Event::GameOver { winning_player });
                     self.round.phase = GamePhase::Finished;
                     return;
                 }
 
-                (self.output)("New round...".to_string());
+                self.output.handle_event(&Event::NewRoundStarting);
 
                 // Otherwise, set up next round
                 let next_dealer = self.player_with_chips_after(self.dealer).unwrap();
@@ -437,70 +488,161 @@ impl Game {
 
 /// TODO: Run the automated parts of the game, split out options/receive and validate inputs for the actions each player can perform.
 /// In future, may dispatch these actions / waiting for responses to different subprocesses.
-pub struct GameRunner(Game);
+pub struct GameRunner {
+    num_players: usize,
+    players: Rc<RefCell<Vec<Box<dyn Player>>>>,
+}
 
 impl GameRunner {
-    pub fn run(mut game: Game) {
-        let mut rng = rng();
+    pub fn new(players: Vec<Box<dyn Player>>) -> Self {
+        GameRunner { num_players: players.len(), players: Rc::new(RefCell::new(players)) }
+    }
+
+    pub fn run_game(&mut self, initial_chips: usize, small_blind: usize, rng: Random) {
+        // TODO: Tidy up all the wrapper types
+        struct RunnerListener(Rc<RefCell<Vec<Box<dyn Player>>>>);
+        
+        impl Listener for RunnerListener {
+            fn handle_event(&self, event: &Event) {
+                print_event(event);
+                match event {
+                    Event::PlayerCards { player, .. } => {
+                        self.0.borrow_mut()[*player].receive_event(event);
+                    },
+                    _ => {
+                        for player in self.0.borrow_mut().iter_mut() {
+                            player.receive_event(event);
+                        }
+                    },
+                }
+            }
+        }
+
+        let listener = Rc::new(RefCell::new(RunnerListener(Rc::clone(&self.players))));
+
+        let mut game = Game::new(self.num_players, initial_chips, small_blind, rng, Box::new(Rc::clone(&listener)));
+
         while game.round.phase != GamePhase::Finished {
             let player = game.round.next_player;
-            let Pot { current_raise, current_player_total, total, chips_by_player, .. } = &game.round.pot;
-            let current_chips_bet = chips_by_player[player];
+            let Pot { current_raise, current_player_total, chips_bet_by_player, .. } = &game.round.pot;
+            let current_chips_bet = chips_bet_by_player[player];
             let chips_required = current_player_total - current_chips_bet;
             let available_chips = game.player_chips[player];
 
             let can_raise = game.round.active_players.len() > 1; // otherwise, all remaining players already All-In
 
-            println!("Player {player}: Pot = {total}, Current raise = {current_raise} (+{chips_required}), Chips remaining = {available_chips}");
-            let action = if chips_required >= available_chips {
-                println!("Player {player}: [All In ({available_chips})] [Fold]");
-                if rng.random_bool(0.5) {
-                    Action::CheckOrCall
+            let action = loop {
+                let action = self.players.borrow_mut()[player].select_action(PlayerInput::new(&game.round.pot, &game.player_chips, &game.round.active_players));
+                let valid = match action {
+                    Action::SmallBlind | Action::BigBlind => false, // automated, not an action a player can pick
+                    Action::Fold | Action::CheckOrCall => true,
+                    Action::Raise(new_raise_total) =>
+                        can_raise && new_raise_total > *current_raise && (new_raise_total <= current_raise - chips_required + available_chips),
+                };
+                if valid {
+                    break action;
                 } else {
-                    Action::Fold
-                }
-            } else {
-                if can_raise {
-                    let max_raise_total = current_raise + available_chips - chips_required;
-                    if chips_required > 0 {
-                        println!("Player {player}: [Call ({chips_required})] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]");
-                        if rng.random_bool(0.7) {
-                            Action::CheckOrCall
-                        } else if rng.random_bool(0.9) {
-                            Action::Raise(rng.random_range(current_raise + 1..=max_raise_total))
-                        } else {
-                            Action::Fold
-                        }
-                    } else {
-                        println!("Player {player}: [Check] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]");
-                        if rng.random_bool(0.5) {
-                            Action::CheckOrCall
-                        } else if rng.random_bool(0.9) {
-                            Action::Raise(rng.random_range(chips_required + 1..=available_chips))
-                        } else {
-                            Action::Fold
-                        }
-                    }
-                } else {
-                    if chips_required > 0 {
-                        println!("Player {player}: [Call ({chips_required})] [Fold]");
-                        if rng.random_bool(0.9) {
-                            Action::CheckOrCall
-                        } else {
-                            Action::Fold
-                        }
-                    } else { // This case might never be possible?
-                        println!("Player {player}: [Check] [Fold]");
-                        if rng.random_bool(0.95) {
-                            Action::CheckOrCall
-                        } else {
-                            Action::Fold
-                        }
-                    }
+                    let error = Event::InvalidAction { player, description: format!("Invalid action {action:?}") };
+                    listener.borrow().handle_event(&error);
                 }
             };
 
             game.handle_action(action, player);
+        }
+    }
+}
+
+// TODO: Clean up what needs including here or not
+pub struct PlayerInput<'a> {
+    pot: &'a Pot,
+    player_chips: &'a Vec<usize>,
+    active_players: &'a HashSet<usize>,
+}
+
+impl<'a> PlayerInput<'a> {
+    fn new(pot: &'a Pot, player_chips: &'a Vec<usize>, active_players: &'a HashSet<usize>) -> Self {
+        PlayerInput { pot, player_chips, active_players }
+    }
+}
+
+pub trait Player {
+    fn receive_event(&mut self, event: &Event);
+    fn select_action(&mut self, input: PlayerInput) -> Action;
+}
+
+pub struct RandomPlayer {
+    player: usize,
+    rng: Random,
+}
+
+impl RandomPlayer {
+    pub fn new(player: usize) -> Self {
+        RandomPlayer { player, rng: Box::new(rand::rng()) }
+    }
+}
+
+impl Player for RandomPlayer {
+    fn receive_event(&mut self, _: &Event) {
+        // Plays randomly, no awareness of events besides playing valid actions
+        //println!("Player {} saw event: ", self.player);
+        //print_event(event);
+    }
+
+    fn select_action(&mut self, PlayerInput { pot, player_chips, active_players }: PlayerInput<'_>) -> Action {
+        let Pot { current_raise, current_player_total, total, chips_bet_by_player, .. } = pot;
+        let current_chips_bet = chips_bet_by_player[self.player];
+        let chips_required = current_player_total - current_chips_bet;
+        let available_chips = player_chips[self.player];
+
+        let can_raise = active_players.len() > 1; // otherwise, all remaining players already All-In
+
+        println!("Player {}: Pot = {total}, Current raise = {current_raise} (+{chips_required}), Chips remaining = {available_chips}", self.player);
+        if chips_required >= available_chips {
+            println!("Player {}: [All In ({available_chips})] [Fold]", self.player);
+            if self.rng.random_bool(0.5) {
+                Action::CheckOrCall
+            } else {
+                Action::Fold
+            }
+        } else {
+            if can_raise {
+                let max_raise_total = current_raise + available_chips - chips_required;
+                if chips_required > 0 {
+                    println!("Player {}: [Call ({chips_required})] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]", self.player);
+                    if self.rng.random_bool(0.7) {
+                        Action::CheckOrCall
+                    } else if self.rng.random_bool(0.9) {
+                        Action::Raise(self.rng.random_range(current_raise + 1..=max_raise_total))
+                    } else {
+                        Action::Fold
+                    }
+                } else {
+                    println!("Player {}: [Check] [Raise (up to {max_raise_total} total / {available_chips} additional)] [Fold]", self.player);
+                    if self.rng.random_bool(0.5) {
+                        Action::CheckOrCall
+                    } else if self.rng.random_bool(0.9) {
+                        Action::Raise(self.rng.random_range(chips_required + 1..=available_chips))
+                    } else {
+                        Action::Fold
+                    }
+                }
+            } else {
+                if chips_required > 0 {
+                    println!("Player {}: [Call ({chips_required})] [Fold]", self.player);
+                    if self.rng.random_bool(0.9) {
+                        Action::CheckOrCall
+                    } else {
+                        Action::Fold
+                    }
+                } else { // This case might never be possible?
+                    println!("Player {}: [Check] [Fold]", self.player);
+                    if self.rng.random_bool(0.95) {
+                        Action::CheckOrCall
+                    } else {
+                        Action::Fold
+                    }
+                }
+            }
         }
     }
 }

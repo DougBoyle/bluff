@@ -1,4 +1,4 @@
-use bluff::game::{Action, Game, GameCards, GameRunner};
+use bluff::game::{Action, Game, GameCards, GameRunner, Player, PrinterListener, RandomPlayer};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -12,7 +12,7 @@ fn main() {
     let rng = Box::new(StdRng::seed_from_u64(1));
 
     println!("Poker game:");
-    let mut game = Game::new(4, 100, 5, rng, Box::new(|s| println!("< {s}")));
+    let mut game = Game::new(4, 100, 5, rng, Box::new(PrinterListener));
 
     game.handle_action(Action::CheckOrCall, 3);
     game.handle_action(Action::CheckOrCall, 0);
@@ -43,5 +43,6 @@ fn main() {
     println!("Game state: {game:?}");
 
     let rng = Box::new(StdRng::seed_from_u64(1));
-    GameRunner::run(Game::new(4, 100, 5, rng, Box::new(|s| println!("< {s}"))));
+    let players = (0..4).map(|player| Box::new(RandomPlayer::new(player)) as Box<dyn Player>).collect();
+    GameRunner::new(players).run_game(100, 5, rng);
 }
